@@ -95,7 +95,7 @@ func TestProxy_HeaderMerging(t *testing.T) {
 	p := &Proxy{
 		services:        services,
 		auth:            authProviders,
-		client:          &http.Client{Timeout: 10 * time.Second},
+		clients:         map[string]*http.Client{"test": {Timeout: 10 * time.Second}},
 		requestFilters:  make(map[string][]filter.RequestFilter),
 		responseFilters: make(map[string][]filter.ResponseFilter),
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -141,7 +141,7 @@ func TestProxy_UnknownService(t *testing.T) {
 	p := &Proxy{
 		services:        map[string]config.ServiceConfig{},
 		auth:            map[string]authProvider{},
-		client:          &http.Client{Timeout: 10 * time.Second},
+		clients:         map[string]*http.Client{"test": {Timeout: 10 * time.Second}},
 		requestFilters:  make(map[string][]filter.RequestFilter),
 		responseFilters: make(map[string][]filter.ResponseFilter),
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -267,7 +267,7 @@ func TestProxy_Timeout(t *testing.T) {
 	defer ts.Close()
 
 	p := newTestProxy(t, ts.URL, "token")
-	p.client.Timeout = 100 * time.Millisecond
+	p.clients["test"].Timeout = 100 * time.Millisecond
 
 	_, err := p.Do(context.Background(), &Request{
 		Service: "test",
@@ -294,7 +294,7 @@ func TestProxy_AuthError(t *testing.T) {
 	p := &Proxy{
 		services:        services,
 		auth:            authProviders,
-		client:          &http.Client{Timeout: 10 * time.Second},
+		clients:         map[string]*http.Client{"test": {Timeout: 10 * time.Second}},
 		requestFilters:  make(map[string][]filter.RequestFilter),
 		responseFilters: make(map[string][]filter.ResponseFilter),
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -348,10 +348,11 @@ func newTestProxy(t *testing.T, baseURL, token string) *Proxy {
 	authProviders := map[string]authProvider{
 		"test": &mockAuthProvider{name: "bearer", token: token},
 	}
+	defaultClient := &http.Client{Timeout: 30 * time.Second}
 	return &Proxy{
 		services:        services,
 		auth:            authProviders,
-		client:          &http.Client{Timeout: 30 * time.Second},
+		clients:         map[string]*http.Client{"test": defaultClient},
 		maxResponseSize: 10 * 1024 * 1024,
 		requestFilters:  make(map[string][]filter.RequestFilter),
 		responseFilters: make(map[string][]filter.ResponseFilter),
