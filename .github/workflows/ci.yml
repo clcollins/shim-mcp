@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CI_IMAGE: shim-mcp-ci:local
+
+jobs:
+  # --- Native Go checks (no container overhead) ---
+
+  fmt:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go-from-mod
+      - run: make fmt-check
+
+  vet:
+    name: Go Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go-from-mod
+      - run: make vet
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go-from-mod
+      - run: make getlint
+      - run: make lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [fmt, vet, lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go-from-mod
+      - run: make test
+
+  race:
+    name: Race Detector
+    runs-on: ubuntu-latest
+    needs: [fmt, vet, lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go-from-mod
+      - run: make test-race
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go-from-mod
+      - run: go test ./... -coverprofile=coverage.out -covermode=atomic
+      - uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go-from-mod
+      - run: make install
+      - run: shim-mcp version
+
+  # --- Containerized checks (same tools as local CI) ---
+
+  ci-build:
+    name: Build CI Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make ci-build
+      - run: podman save ${{ env.CI_IMAGE }} -o ci-image.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-image
+          path: ci-image.tar
+          retention-days: 1
+
+  yaml-lint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    needs: [ci-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-image
+      - run: podman load < ci-image.tar
+      - run: podman run --rm -v "$(pwd):/src:Z" -w /src ${{ env.CI_IMAGE }} make yaml-lint
+
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    needs: [ci-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-image
+      - run: podman load < ci-image.tar
+      - run: podman run --rm -v "$(pwd):/src:Z" -w /src ${{ env.CI_IMAGE }} make markdown-lint
+
+  docs-check:
+    name: Plan Docs Check
+    runs-on: ubuntu-latest
+    needs: [ci-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-image
+      - run: podman load < ci-image.tar
+      - run: podman run --rm -v "$(pwd):/src:Z" -w /src ${{ env.CI_IMAGE }} make docs-check
+
+  containerfile-check:
+    name: Containerfile Check
+    runs-on: ubuntu-latest
+    needs: [ci-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-image
+      - run: podman load < ci-image.tar
+      - run: podman run --rm -v "$(pwd):/src:Z" -w /src ${{ env.CI_IMAGE }} make containerfile-check
+
+  image-build:
+    name: Image Build
+    runs-on: ubuntu-latest
+    needs: [ci-build]
+    steps:
+      - uses: actions/checkout@v4
+      - run: make image-build
