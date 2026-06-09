@@ -14,6 +14,7 @@ import (
 )
 
 var validAuthTypes = map[string]bool{
+	"none":   true,
 	"basic":  true,
 	"bearer": true,
 	"token":  true,
@@ -118,6 +119,8 @@ func validateService(name string, svc *ServiceConfig) error {
 
 func validateAuth(name string, auth *AuthConfig) error {
 	switch auth.Type {
+	case "none":
+		// No credentials needed
 	case "basic":
 		if err := validateCredentialRef(name, "username", &auth.Username); err != nil {
 			return err

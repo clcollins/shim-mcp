@@ -63,3 +63,21 @@ services:
         file: "~/.config/unifi/unifi-bootstrapper.env"
         format: env
         key: "UNIFI_API_KEY"
+
+  ollama:
+    base_url: "http://localhost:11434"
+    auth:
+      type: none
+    filters:
+      request:
+        validate_json_body: true
+        auto_content_type: true
+
+  ramalama:
+    base_url: "http://localhost:8080"
+    auth:
+      type: none
+    filters:
+      request:
+        validate_json_body: true
+        auto_content_type: true

@@ -14,6 +14,8 @@ type AuthProvider interface {
 
 func NewAuthProvider(cfg config.AuthConfig) (AuthProvider, error) {
 	switch cfg.Type {
+	case "none":
+		return &noneProvider{}, nil
 	case "basic":
 		return newBasicProvider(cfg), nil
 	case "bearer":
