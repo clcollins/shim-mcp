@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -48,18 +50,30 @@ type Proxy struct {
 	auth            map[string]authProvider
 	client          *http.Client
 	maxResponseSize int64
-	requestFilters  []filter.RequestFilter
-	responseFilters []filter.ResponseFilter
+	requestFilters  map[string][]filter.RequestFilter
+	responseFilters map[string][]filter.ResponseFilter
+	logger          *slog.Logger
 }
 
 func New(cfg *config.Config) (*Proxy, error) {
 	authProviders := make(map[string]authProvider, len(cfg.Services))
+	reqFilters := make(map[string][]filter.RequestFilter, len(cfg.Services))
+	respFilters := make(map[string][]filter.ResponseFilter, len(cfg.Services))
+
 	for name, svc := range cfg.Services {
 		provider, err := auth.NewAuthProvider(svc.Auth)
 		if err != nil {
 			return nil, fmt.Errorf("creating auth provider for %q: %w", name, err)
 		}
 		authProviders[name] = provider
+
+		rf, rsf := buildFilters(svc.Filters)
+		if len(rf) > 0 {
+			reqFilters[name] = rf
+		}
+		if len(rsf) > 0 {
+			respFilters[name] = rsf
+		}
 	}
 
 	return &Proxy{
@@ -67,10 +81,36 @@ func New(cfg *config.Config) (*Proxy, error) {
 		auth:            authProviders,
 		client:          &http.Client{Timeout: 30 * time.Second},
 		maxResponseSize: 10 * 1024 * 1024,
+		requestFilters:  reqFilters,
+		responseFilters: respFilters,
+		logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}, nil
 }
 
+func buildFilters(cfg config.FilterConfig) ([]filter.RequestFilter, []filter.ResponseFilter) {
+	var req []filter.RequestFilter
+	var resp []filter.ResponseFilter
+
+	if cfg.Request.AutoContentType {
+		req = append(req, &filter.AutoContentType{})
+	}
+	if cfg.Request.RejectEmptyBody {
+		req = append(req, &filter.RejectEmptyBody{})
+	}
+	if cfg.Request.ValidateJSONBody {
+		req = append(req, &filter.ValidateJSONBody{})
+	}
+
+	if len(cfg.Response.StripFields) > 0 {
+		resp = append(resp, filter.NewStripFields(cfg.Response.StripFields))
+	}
+
+	return req, resp
+}
+
 func (p *Proxy) Do(ctx context.Context, proxyReq *Request) (*Response, error) {
+	start := time.Now()
+
 	svc, ok := p.services[proxyReq.Service]
 	if !ok {
 		return nil, fmt.Errorf("unknown service: %q", proxyReq.Service)
@@ -115,8 +155,14 @@ func (p *Proxy) Do(ctx context.Context, proxyReq *Request) (*Response, error) {
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
-	for _, f := range p.requestFilters {
-		req, err = f.FilterRequest(req)
+	filterCtx := filter.Context{
+		ServiceName: proxyReq.Service,
+		Method:      method,
+		Path:        proxyReq.Path,
+	}
+
+	for _, f := range p.requestFilters[proxyReq.Service] {
+		req, err = f.FilterRequest(filterCtx, req)
 		if err != nil {
 			return nil, fmt.Errorf("request filter %s: %w", f.Name(), err)
 		}
@@ -128,8 +174,8 @@ func (p *Proxy) Do(ctx context.Context, proxyReq *Request) (*Response, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	for _, f := range p.responseFilters {
-		filtered, filterErr := f.FilterResponse(resp)
+	for _, f := range p.responseFilters[proxyReq.Service] {
+		filtered, filterErr := f.FilterResponse(filterCtx, resp)
 		if filterErr != nil {
 			return nil, fmt.Errorf("response filter %s: %w", f.Name(), filterErr)
 		}
@@ -146,6 +192,15 @@ func (p *Proxy) Do(ctx context.Context, proxyReq *Request) (*Response, error) {
 	if int64(len(respBody)) > p.maxResponseSize {
 		bodyStr = bodyStr[:p.maxResponseSize]
 	}
+
+	p.logger.Info("request completed",
+		"service", proxyReq.Service,
+		"method", method,
+		"path", proxyReq.Path,
+		"status", resp.StatusCode,
+		"response_bytes", len(respBody),
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 
 	return &Response{
 		StatusCode: resp.StatusCode,

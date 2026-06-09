@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"github.com/clcollins/shim-mcp/internal/config"
+	"github.com/clcollins/shim-mcp/internal/filter"
 )
 
 type mockAuthProvider struct {
@@ -89,9 +93,12 @@ func TestProxy_HeaderMerging(t *testing.T) {
 		"test": &mockAuthProvider{name: "bearer", token: "tok"},
 	}
 	p := &Proxy{
-		services: services,
-		auth:     authProviders,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		services:        services,
+		auth:            authProviders,
+		client:          &http.Client{Timeout: 10 * time.Second},
+		requestFilters:  make(map[string][]filter.RequestFilter),
+		responseFilters: make(map[string][]filter.ResponseFilter),
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	_, err := p.Do(context.Background(), &Request{
@@ -132,9 +139,12 @@ func TestProxy_SSRFPrevention(t *testing.T) {
 
 func TestProxy_UnknownService(t *testing.T) {
 	p := &Proxy{
-		services: map[string]config.ServiceConfig{},
-		auth:     map[string]authProvider{},
-		client:   &http.Client{Timeout: 10 * time.Second},
+		services:        map[string]config.ServiceConfig{},
+		auth:            map[string]authProvider{},
+		client:          &http.Client{Timeout: 10 * time.Second},
+		requestFilters:  make(map[string][]filter.RequestFilter),
+		responseFilters: make(map[string][]filter.ResponseFilter),
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	_, err := p.Do(context.Background(), &Request{
@@ -282,9 +292,12 @@ func TestProxy_AuthError(t *testing.T) {
 		"test": &mockAuthProvider{name: "bearer", err: fmt.Errorf("credential error")},
 	}
 	p := &Proxy{
-		services: services,
-		auth:     authProviders,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		services:        services,
+		auth:            authProviders,
+		client:          &http.Client{Timeout: 10 * time.Second},
+		requestFilters:  make(map[string][]filter.RequestFilter),
+		responseFilters: make(map[string][]filter.ResponseFilter),
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	_, err := p.Do(context.Background(), &Request{
@@ -340,5 +353,134 @@ func newTestProxy(t *testing.T, baseURL, token string) *Proxy {
 		auth:            authProviders,
 		client:          &http.Client{Timeout: 30 * time.Second},
 		maxResponseSize: 10 * 1024 * 1024,
+		requestFilters:  make(map[string][]filter.RequestFilter),
+		responseFilters: make(map[string][]filter.ResponseFilter),
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func TestProxy_ValidateJSONBodyRejectsInvalid(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	p := newTestProxy(t, ts.URL, "token")
+	p.requestFilters["test"] = []filter.RequestFilter{&filter.ValidateJSONBody{}}
+
+	_, err := p.Do(context.Background(), &Request{
+		Service: "test",
+		Method:  "POST",
+		Path:    "/test",
+		Headers: map[string]string{"Content-Type": "application/json"},
+		Body:    `{"broken":}`,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid JSON body")
+	}
+	if !strings.Contains(err.Error(), "validate_json_body") {
+		t.Errorf("error should mention filter name: %v", err)
+	}
+}
+
+func TestProxy_AutoContentTypeSetsHeader(t *testing.T) {
+	var receivedCT string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedCT = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	p := newTestProxy(t, ts.URL, "token")
+	p.requestFilters["test"] = []filter.RequestFilter{&filter.AutoContentType{}}
+
+	_, err := p.Do(context.Background(), &Request{
+		Service: "test",
+		Method:  "POST",
+		Path:    "/test",
+		Body:    `{"key":"value"}`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if receivedCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", receivedCT)
+	}
+}
+
+func TestProxy_StripFieldsRemovesConfiguredFields(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"expand":"all","self":"http://x","key":"SREP-1","summary":"test"}`)
+	}))
+	defer ts.Close()
+
+	p := newTestProxy(t, ts.URL, "token")
+	p.responseFilters["test"] = []filter.ResponseFilter{
+		filter.NewStripFields([]string{"expand", "self"}),
+	}
+
+	resp, err := p.Do(context.Background(), &Request{
+		Service: "test",
+		Method:  "GET",
+		Path:    "/test",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+		t.Fatalf("parsing response: %v", err)
+	}
+	if _, ok := result["expand"]; ok {
+		t.Error("expand should be stripped")
+	}
+	if _, ok := result["self"]; ok {
+		t.Error("self should be stripped")
+	}
+	if _, ok := result["key"]; !ok {
+		t.Error("key should be preserved")
+	}
+}
+
+func TestProxy_FiltersOnlyApplyToConfiguredService(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	p := newTestProxy(t, ts.URL, "token")
+	p.requestFilters["other-service"] = []filter.RequestFilter{&filter.RejectEmptyBody{}}
+
+	_, err := p.Do(context.Background(), &Request{
+		Service: "test",
+		Method:  "POST",
+		Path:    "/test",
+	})
+	if err != nil {
+		t.Fatalf("should not error — reject_empty_body is on different service: %v", err)
+	}
+}
+
+func TestProxy_NoFiltersConfigured(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer ts.Close()
+
+	p := newTestProxy(t, ts.URL, "token")
+
+	resp, err := p.Do(context.Background(), &Request{
+		Service: "test",
+		Method:  "GET",
+		Path:    "/test",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 }
