@@ -40,3 +40,14 @@ services:
         env: "PAGERDUTY_TOKEN"
     headers:
       content-type: "application/json"
+
+  ocm:
+    base_url: "https://api.openshift.com"
+    auth:
+      type: bearer
+      token:
+        file: "~/.config/ocm/ocm.json"
+        key: ".access_token"
+    headers:
+      accept: "application/json"
+      content-type: "application/json"
