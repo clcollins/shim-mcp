@@ -25,10 +25,11 @@ type Config struct {
 }
 
 type ServiceConfig struct {
-	BaseURL string            `mapstructure:"base_url"`
-	Auth    AuthConfig        `mapstructure:"auth"`
-	Headers map[string]string `mapstructure:"headers"`
-	Filters FilterConfig      `mapstructure:"filters"`
+	BaseURL       string            `mapstructure:"base_url"`
+	Auth          AuthConfig        `mapstructure:"auth"`
+	Headers       map[string]string `mapstructure:"headers"`
+	Filters       FilterConfig      `mapstructure:"filters"`
+	TLSSkipVerify bool              `mapstructure:"tls_skip_verify"`
 }
 
 type FilterConfig struct {
@@ -206,6 +207,10 @@ func (ref *CredentialRef) Resolve() (string, error) {
 		return val, nil
 	}
 
+	if format == "env" {
+		return resolveEnvFile(string(data), ref.Key)
+	}
+
 	var obj any
 	switch format {
 	case "json":
@@ -218,7 +223,7 @@ func (ref *CredentialRef) Resolve() (string, error) {
 		}
 		obj = normalizeYAML(obj)
 	default:
-		return "", fmt.Errorf("key extraction requires format json or yaml, got %q", format)
+		return "", fmt.Errorf("key extraction requires format json, yaml, or env, got %q", format)
 	}
 
 	return extractPath(obj, ref.Key)
@@ -255,6 +260,8 @@ func inferFormat(filePath, explicit string) string {
 		return "json"
 	case ".yaml", ".yml":
 		return "yaml"
+	case ".env":
+		return "env"
 	default:
 		return "text"
 	}
@@ -378,4 +385,27 @@ func normalizeYAML(v any) any {
 	default:
 		return v
 	}
+}
+
+func resolveEnvFile(content, key string) (string, error) {
+	prefix := key + "="
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, prefix) {
+			val := line[len(prefix):]
+			val = strings.TrimSpace(val)
+			if (strings.HasPrefix(val, `"`) && strings.HasSuffix(val, `"`)) ||
+				(strings.HasPrefix(val, `'`) && strings.HasSuffix(val, `'`)) {
+				val = val[1 : len(val)-1]
+			}
+			if val == "" {
+				return "", fmt.Errorf("key %q has empty value in env file", key)
+			}
+			return val, nil
+		}
+	}
+	return "", fmt.Errorf("key %q not found in env file", key)
 }

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -48,7 +49,7 @@ type Response struct {
 type Proxy struct {
 	services        map[string]config.ServiceConfig
 	auth            map[string]authProvider
-	client          *http.Client
+	clients         map[string]*http.Client
 	maxResponseSize int64
 	requestFilters  map[string][]filter.RequestFilter
 	responseFilters map[string][]filter.ResponseFilter
@@ -57,8 +58,11 @@ type Proxy struct {
 
 func New(cfg *config.Config) (*Proxy, error) {
 	authProviders := make(map[string]authProvider, len(cfg.Services))
+	httpClients := make(map[string]*http.Client, len(cfg.Services))
 	reqFilters := make(map[string][]filter.RequestFilter, len(cfg.Services))
 	respFilters := make(map[string][]filter.ResponseFilter, len(cfg.Services))
+
+	defaultClient := &http.Client{Timeout: 30 * time.Second}
 
 	for name, svc := range cfg.Services {
 		provider, err := auth.NewAuthProvider(svc.Auth)
@@ -66,6 +70,17 @@ func New(cfg *config.Config) (*Proxy, error) {
 			return nil, fmt.Errorf("creating auth provider for %q: %w", name, err)
 		}
 		authProviders[name] = provider
+
+		if svc.TLSSkipVerify {
+			httpClients[name] = &http.Client{
+				Timeout: 30 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // per-service opt-in
+				},
+			}
+		} else {
+			httpClients[name] = defaultClient
+		}
 
 		rf, rsf := buildFilters(svc.Filters)
 		if len(rf) > 0 {
@@ -79,7 +94,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 	return &Proxy{
 		services:        cfg.Services,
 		auth:            authProviders,
-		client:          &http.Client{Timeout: 30 * time.Second},
+		clients:         httpClients,
 		maxResponseSize: 10 * 1024 * 1024,
 		requestFilters:  reqFilters,
 		responseFilters: respFilters,
@@ -168,7 +183,8 @@ func (p *Proxy) Do(ctx context.Context, proxyReq *Request) (*Response, error) {
 		}
 	}
 
-	resp, err := p.client.Do(req)
+	client := p.clients[proxyReq.Service]
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}

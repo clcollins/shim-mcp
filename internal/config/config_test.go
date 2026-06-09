@@ -262,7 +262,7 @@ func TestInferFormat(t *testing.T) {
 		{"config.yml", "", "yaml"},
 		{"token", "", "text"},
 		{"config.json", "yaml", "yaml"},
-		{".env", "", "text"},
+		{".env", "", "env"},
 	}
 	for _, tt := range tests {
 		got := inferFormat(tt.file, tt.explicit)
@@ -701,5 +701,120 @@ services:
 	}
 	if len(svc.Filters.Response.StripFields) != 0 {
 		t.Error("strip_fields should default to empty")
+	}
+}
+
+func TestCredentialRef_ResolveEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.env")
+	writeFile(t, path, []byte("# comment\nAPI_HOST=https://192.168.1.1\nAPI_KEY=secret-key-123\nEMPTY_VAL=\n"))
+
+	ref := CredentialRef{File: path, Format: "env", Key: "API_KEY"}
+	val, err := ref.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "secret-key-123" {
+		t.Errorf("got %q, want %q", val, "secret-key-123")
+	}
+}
+
+func TestCredentialRef_ResolveEnvFileQuoted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.env")
+	writeFile(t, path, []byte("TOKEN=\"quoted-value\"\nSINGLE='single-quoted'\n"))
+
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"TOKEN", "quoted-value"},
+		{"SINGLE", "single-quoted"},
+	}
+	for _, tt := range tests {
+		ref := CredentialRef{File: path, Format: "env", Key: tt.key}
+		val, err := ref.Resolve()
+		if err != nil {
+			t.Fatalf("key %q: unexpected error: %v", tt.key, err)
+		}
+		if val != tt.want {
+			t.Errorf("key %q: got %q, want %q", tt.key, val, tt.want)
+		}
+	}
+}
+
+func TestCredentialRef_ResolveEnvFileMissingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.env")
+	writeFile(t, path, []byte("OTHER_KEY=value\n"))
+
+	ref := CredentialRef{File: path, Format: "env", Key: "MISSING"}
+	_, err := ref.Resolve()
+	if err == nil {
+		t.Fatal("expected error for missing key")
+	}
+}
+
+func TestCredentialRef_ResolveEnvFileEmptyValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.env")
+	writeFile(t, path, []byte("EMPTY=\n"))
+
+	ref := CredentialRef{File: path, Format: "env", Key: "EMPTY"}
+	_, err := ref.Resolve()
+	if err == nil {
+		t.Fatal("expected error for empty value")
+	}
+}
+
+func TestCredentialRef_ResolveEnvFileInferred(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credentials.env")
+	writeFile(t, path, []byte("MY_TOKEN=inferred-from-ext\n"))
+
+	ref := CredentialRef{File: path, Key: "MY_TOKEN"}
+	val, err := ref.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "inferred-from-ext" {
+		t.Errorf("got %q, want %q", val, "inferred-from-ext")
+	}
+}
+
+func TestLoadConfig_TLSSkipVerify(t *testing.T) {
+	yaml := `
+services:
+  svc:
+    base_url: "https://192.168.1.1"
+    tls_skip_verify: true
+    auth:
+      type: bearer
+      token: {env: "TOKEN"}
+`
+	cfg, err := LoadConfig(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Services["svc"].TLSSkipVerify {
+		t.Error("tls_skip_verify should be true")
+	}
+}
+
+func TestLoadConfig_TLSSkipVerifyDefault(t *testing.T) {
+	yaml := `
+services:
+  svc:
+    base_url: "https://example.com"
+    auth:
+      type: bearer
+      token: {env: "TOKEN"}
+`
+	cfg, err := LoadConfig(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Services["svc"].TLSSkipVerify {
+		t.Error("tls_skip_verify should default to false")
 	}
 }
