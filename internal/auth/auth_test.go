@@ -234,3 +234,23 @@ func TestBasicAuthProvider_NoCredentialInError(t *testing.T) {
 		t.Error("error message contains username value")
 	}
 }
+
+func TestNoneAuthProvider_NoHeaders(t *testing.T) {
+	provider, err := NewAuthProvider(config.AuthConfig{Type: "none"})
+	if err != nil {
+		t.Fatalf("creating none provider: %v", err)
+	}
+
+	if provider.Name() != "none" {
+		t.Errorf("Name() = %q, want none", provider.Name())
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "http://localhost:11434/api/tags", nil)
+	if err := provider.Authenticate(req); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	if auth := req.Header.Get("Authorization"); auth != "" {
+		t.Errorf("Authorization header should be empty, got %q", auth)
+	}
+}

@@ -818,3 +818,40 @@ services:
 		t.Error("tls_skip_verify should default to false")
 	}
 }
+
+func TestLoadConfig_AuthTypeNone(t *testing.T) {
+	yaml := `
+services:
+  ollama:
+    base_url: "http://localhost:11434"
+    auth:
+      type: none
+`
+	cfg, err := LoadConfig(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Services["ollama"].Auth.Type != "none" {
+		t.Errorf("auth.type = %q, want none", cfg.Services["ollama"].Auth.Type)
+	}
+}
+
+func TestLoadConfig_AuthTypeNoneNoCredentials(t *testing.T) {
+	yaml := `
+services:
+  svc:
+    base_url: "http://localhost:8080"
+    auth:
+      type: none
+    filters:
+      request:
+        auto_content_type: true
+`
+	cfg, err := LoadConfig(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Services["svc"].Auth.Token.File != "" && cfg.Services["svc"].Auth.Token.Env != "" {
+		t.Error("none auth should not require credentials")
+	}
+}
