@@ -28,6 +28,22 @@ type ServiceConfig struct {
 	BaseURL string            `mapstructure:"base_url"`
 	Auth    AuthConfig        `mapstructure:"auth"`
 	Headers map[string]string `mapstructure:"headers"`
+	Filters FilterConfig      `mapstructure:"filters"`
+}
+
+type FilterConfig struct {
+	Request  RequestFilterConfig  `mapstructure:"request"`
+	Response ResponseFilterConfig `mapstructure:"response"`
+}
+
+type RequestFilterConfig struct {
+	ValidateJSONBody bool `mapstructure:"validate_json_body"`
+	AutoContentType  bool `mapstructure:"auto_content_type"`
+	RejectEmptyBody  bool `mapstructure:"reject_empty_body"`
+}
+
+type ResponseFilterConfig struct {
+	StripFields []string `mapstructure:"strip_fields"`
 }
 
 type AuthConfig struct {

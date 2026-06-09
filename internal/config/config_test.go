@@ -643,3 +643,63 @@ services:
 		t.Fatal("expected error when both file and env set on credential ref")
 	}
 }
+
+func TestLoadConfig_WithFilters(t *testing.T) {
+	yaml := `
+services:
+  svc:
+    base_url: "https://example.com"
+    auth:
+      type: bearer
+      token: {env: "TOKEN"}
+    filters:
+      request:
+        validate_json_body: true
+        auto_content_type: true
+        reject_empty_body: true
+      response:
+        strip_fields:
+          - "expand"
+          - "self"
+          - "schema"
+`
+	cfg, err := LoadConfig(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	svc := cfg.Services["svc"]
+	if !svc.Filters.Request.ValidateJSONBody {
+		t.Error("validate_json_body should be true")
+	}
+	if !svc.Filters.Request.AutoContentType {
+		t.Error("auto_content_type should be true")
+	}
+	if !svc.Filters.Request.RejectEmptyBody {
+		t.Error("reject_empty_body should be true")
+	}
+	if len(svc.Filters.Response.StripFields) != 3 {
+		t.Errorf("strip_fields length = %d, want 3", len(svc.Filters.Response.StripFields))
+	}
+}
+
+func TestLoadConfig_WithoutFilters(t *testing.T) {
+	yaml := `
+services:
+  svc:
+    base_url: "https://example.com"
+    auth:
+      type: bearer
+      token: {env: "TOKEN"}
+`
+	cfg, err := LoadConfig(writeTestConfig(t, yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	svc := cfg.Services["svc"]
+	if svc.Filters.Request.ValidateJSONBody {
+		t.Error("validate_json_body should default to false")
+	}
+	if len(svc.Filters.Response.StripFields) != 0 {
+		t.Error("strip_fields should default to empty")
+	}
+}
