@@ -1,0 +1,18 @@
+name: "Setup Go from go.mod"
+description: "Extract Go version from go.mod and install it"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Extract Go version from go.mod
+      id: go-version
+      shell: bash
+      run: |
+        GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+        echo "version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ steps.go-version.outputs.version }}
+        cache: true

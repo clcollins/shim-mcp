@@ -1,0 +1,42 @@
+services:
+  jira:
+    base_url: "https://issues.example.com"
+    auth:
+      type: basic
+      username:
+        file: "~/.config/claude/claude.json"
+        key: '.jira."user-email"'
+      token:
+        file: "~/.config/claude/claude.json"
+        key: ".jira.token"
+    headers:
+      content-type: "application/json"
+      accept: "application/json"
+
+  github:
+    base_url: "https://api.github.com"
+    auth:
+      type: token
+      token:
+        file: "~/.config/github/token"
+    headers:
+      accept: "application/vnd.github.v3+json"
+
+  gitlab:
+    base_url: "https://gitlab.example.com/api/v4"
+    auth:
+      type: bearer
+      token:
+        file: "~/.config/glab-cli/config.yml"
+        key: '.hosts."gitlab.example.com".token'
+
+  pagerduty:
+    base_url: "https://api.pagerduty.com"
+    auth:
+      type: header
+      header: "Authorization"
+      template: "Token token={{.Token}}"
+      token:
+        env: "PAGERDUTY_TOKEN"
+    headers:
+      content-type: "application/json"
