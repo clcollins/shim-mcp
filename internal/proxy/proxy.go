@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -56,7 +55,7 @@ type Proxy struct {
 	logger          *slog.Logger
 }
 
-func New(cfg *config.Config) (*Proxy, error) {
+func New(cfg *config.Config, logger *slog.Logger) (*Proxy, error) {
 	authProviders := make(map[string]authProvider, len(cfg.Services))
 	httpClients := make(map[string]*http.Client, len(cfg.Services))
 	reqFilters := make(map[string][]filter.RequestFilter, len(cfg.Services))
@@ -98,7 +97,7 @@ func New(cfg *config.Config) (*Proxy, error) {
 		maxResponseSize: 10 * 1024 * 1024,
 		requestFilters:  reqFilters,
 		responseFilters: respFilters,
-		logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		logger:          logger,
 	}, nil
 }
 

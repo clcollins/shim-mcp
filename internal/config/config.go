@@ -13,6 +13,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var validLogLevels = map[string]bool{
+	"debug": true,
+	"info":  true,
+	"warn":  true,
+	"error": true,
+}
+
 var validAuthTypes = map[string]bool{
 	"none":   true,
 	"basic":  true,
@@ -23,6 +30,7 @@ var validAuthTypes = map[string]bool{
 
 type Config struct {
 	Services map[string]ServiceConfig `mapstructure:"services"`
+	LogLevel string                   `mapstructure:"log_level"`
 }
 
 type ServiceConfig struct {
@@ -85,6 +93,11 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 		cfg.Services[name] = svc
+	}
+
+	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
+	if cfg.LogLevel != "" && !validLogLevels[cfg.LogLevel] {
+		return nil, fmt.Errorf("invalid log_level %q (valid: debug, info, warn, error)", cfg.LogLevel)
 	}
 
 	return &cfg, nil
