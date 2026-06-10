@@ -836,6 +836,58 @@ services:
 	}
 }
 
+func TestLoadConfig_LogLevelValid(t *testing.T) {
+	tests := []struct {
+		level string
+		want  string
+	}{
+		{"debug", "debug"},
+		{"info", "info"},
+		{"warn", "warn"},
+		{"error", "error"},
+		{"ERROR", "error"},
+		{"Debug", "debug"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		levelLine := ""
+		if tt.level != "" {
+			levelLine = "log_level: " + tt.level + "\n"
+		}
+		yaml := levelLine + `
+services:
+  svc:
+    base_url: "https://example.com"
+    auth:
+      type: bearer
+      token: {env: "TOKEN"}
+`
+		cfg, err := LoadConfig(writeTestConfig(t, yaml))
+		if err != nil {
+			t.Fatalf("level %q: unexpected error: %v", tt.level, err)
+		}
+		if cfg.LogLevel != tt.want {
+			t.Errorf("level %q: got %q, want %q", tt.level, cfg.LogLevel, tt.want)
+		}
+	}
+}
+
+func TestLoadConfig_LogLevelInvalid(t *testing.T) {
+	yaml := `
+log_level: "verbose"
+services:
+  svc:
+    base_url: "https://example.com"
+    auth:
+      type: bearer
+      token: {env: "TOKEN"}
+`
+	_, err := LoadConfig(writeTestConfig(t, yaml))
+	if err == nil {
+		t.Fatal("expected error for invalid log_level")
+	}
+}
+
 func TestLoadConfig_AuthTypeNoneNoCredentials(t *testing.T) {
 	yaml := `
 services:

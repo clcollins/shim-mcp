@@ -9,6 +9,8 @@ files.
 ## Structure
 
 ```yaml
+log_level: <string>          # optional — debug, info, warn, error (default: error)
+
 services:
   <service-name>:
     base_url: <string>        # required — API base URL (https)
@@ -21,6 +23,21 @@ services:
     headers:                  # optional — default headers sent with every request
       <Header-Name>: <value>
 ```
+
+## Log Level
+
+Controls logging verbosity. Logs are written to both stderr and the systemd
+journal (when available). If journald is unavailable, stderr is the sole
+output.
+
+Precedence (highest to lowest):
+
+1. `--log-level` CLI flag
+2. `SHIM_MCP_LOG_LEVEL` environment variable
+3. `log_level` config file key
+4. Default: `error`
+
+Valid values: `debug`, `info`, `warn`, `error` (case-insensitive).
 
 ## Auth Types
 

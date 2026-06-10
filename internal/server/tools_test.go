@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -34,7 +36,7 @@ func connectTestClient(t *testing.T, ts *httptest.Server) *mcp.ClientSession {
 
 	t.Setenv("TEST_AUTH_TOKEN", "test-bearer-token")
 
-	p, err := proxy.New(cfg)
+	p, err := proxy.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("creating proxy: %v", err)
 	}
