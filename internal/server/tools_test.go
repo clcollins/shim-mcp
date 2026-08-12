@@ -241,6 +241,128 @@ func TestListServicesTool(t *testing.T) {
 	}
 }
 
+func TestHTTPRequestTool_401ReturnsError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Www-Authenticate", `Bearer realm="api"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	defer ts.Close()
+
+	session := connectTestClient(t, ts)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "http_request",
+		Arguments: map[string]any{
+			"service": "testapi",
+			"method":  "GET",
+			"path":    "/api/v1/items",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+
+	if !result.IsError {
+		t.Fatal("expected IsError=true for 401 response")
+	}
+
+	resultJSON, _ := json.Marshal(result)
+	resultStr := string(resultJSON)
+
+	if !strings.Contains(resultStr, "401") {
+		t.Error("error should contain HTTP status code 401")
+	}
+	if !strings.Contains(resultStr, "testapi") {
+		t.Error("error should contain service name")
+	}
+	if !strings.Contains(resultStr, "Bad credentials") {
+		t.Error("error should contain upstream response body")
+	}
+}
+
+func TestHTTPRequestTool_403ReturnsError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Insufficient permissions"}`))
+	}))
+	defer ts.Close()
+
+	session := connectTestClient(t, ts)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "http_request",
+		Arguments: map[string]any{
+			"service": "testapi",
+			"method":  "GET",
+			"path":    "/api/v1/admin",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+
+	if !result.IsError {
+		t.Fatal("expected IsError=true for 403 response")
+	}
+
+	resultJSON, _ := json.Marshal(result)
+	resultStr := string(resultJSON)
+
+	if !strings.Contains(resultStr, "403") {
+		t.Error("error should contain HTTP status code 403")
+	}
+	if !strings.Contains(resultStr, "testapi") {
+		t.Error("error should contain service name")
+	}
+	if !strings.Contains(resultStr, "Insufficient permissions") {
+		t.Error("error should contain upstream response body")
+	}
+}
+
+func TestHTTPRequestTool_404ReturnsNormally(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not found"}`))
+	}))
+	defer ts.Close()
+
+	session := connectTestClient(t, ts)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "http_request",
+		Arguments: map[string]any{
+			"service": "testapi",
+			"method":  "GET",
+			"path":    "/api/v1/missing",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+
+	if result.IsError {
+		t.Error("expected IsError=false for 404 response (not an auth error)")
+	}
+
+	if result.StructuredContent != nil {
+		scBytes, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			t.Fatalf("marshaling structured content: %v", err)
+		}
+		var resp httpResponseOutput
+		if err := json.Unmarshal(scBytes, &resp); err != nil {
+			t.Fatalf("unmarshaling structured content: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			t.Errorf("status = %d, want 404", resp.StatusCode)
+		}
+	}
+}
+
 func TestToolsList(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -71,6 +71,15 @@ func httpRequestHandler(p *proxy.Proxy) mcp.ToolHandlerFor[httpRequestInput, htt
 			return nil, httpResponseOutput{}, fmt.Errorf("request failed: %w", err)
 		}
 
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			return nil, httpResponseOutput{}, fmt.Errorf(
+				"HTTP %d from service %q: authentication/authorization failed — "+
+					"the credential configured for this service may be expired or invalid. "+
+					"Response: %s",
+				resp.StatusCode, input.Service, resp.Body,
+			)
+		}
+
 		return nil, httpResponseOutput{
 			StatusCode: resp.StatusCode,
 			Headers:    resp.Headers,
