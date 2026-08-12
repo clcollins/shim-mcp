@@ -57,39 +57,35 @@ credential source options.
 
 ### 3. Configure Claude Code
 
-Add shim-mcp as an MCP server in Claude Code. You can configure it at
-the user level (available in all projects) or the project level.
+Register shim-mcp as an MCP server in Claude Code. Use `--scope user`
+so it is available in all projects:
 
-**User-level** (recommended — add to `~/.claude/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "shim-mcp": {
-      "command": "shim-mcp",
-      "args": ["serve", "--config", "/home/YOUR_USER/.config/shim-mcp/config.yaml"]
-    }
-  }
-}
-```
-
-**Project-level** (add to `.claude/settings.json` in any repo):
-
-```json
-{
-  "mcpServers": {
-    "shim-mcp": {
-      "command": "shim-mcp",
-      "args": ["serve", "--config", "/home/YOUR_USER/.config/shim-mcp/config.yaml"]
-    }
-  }
-}
+```bash
+claude mcp add --scope user shim-mcp -- \
+  shim-mcp serve --config /home/YOUR_USER/.config/shim-mcp/config.yaml
 ```
 
 Replace `/home/YOUR_USER/` with your actual home directory path. The
 `--config` flag requires an absolute path — tilde expansion (`~`) is
 handled inside the config file for credential paths, but the config
 file path itself must be absolute.
+
+Then add permission entries to `~/.claude/settings.json` so the tools
+are allowed without prompting:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__shim-mcp__http_request",
+      "mcp__shim-mcp__list_services"
+    ]
+  }
+}
+```
+
+Both tools are read-only proxied HTTP requests — credentials never
+cross the MCP boundary — so they are safe to allow globally.
 
 ### 4. Verify it works
 
