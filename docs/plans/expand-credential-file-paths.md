@@ -73,27 +73,38 @@ func (ref *CredentialRef) expandAndValidatePath() error {
         return nil
     }
 
-    home, homeErr := os.UserHomeDir()
-    usesHome := strings.Contains(ref.File, "$HOME") ||
-        strings.Contains(ref.File, "${HOME}") ||
-        strings.HasPrefix(ref.File, "~/")
-    if usesHome && homeErr != nil {
-        return fmt.Errorf("expanding home directory: %w", homeErr)
+    // Resolve home lazily, at most once, and only when a form that
+    // actually needs it is present.
+    var home string
+    var homeResolved bool
+    var homeErr error
+    getHome := func() string {
+        if !homeResolved {
+            home, homeErr = os.UserHomeDir()
+            homeResolved = true
+        }
+        return home
     }
 
     ref.File = os.Expand(ref.File, func(name string) string {
         if name == "HOME" {
-            return home
+            return getHome()
         }
         return "$" + name // leave other vars literal
     })
 
-    if strings.Contains(ref.File, "..") {
-        return fmt.Errorf("path traversal not allowed: %q", ref.File)
+    // Concatenate (not filepath.Join) so a "~/" whose home contains ".."
+    // is not Clean'd before the traversal guard runs.
+    if strings.HasPrefix(ref.File, "~/") {
+        ref.File = getHome() + ref.File[1:]
     }
 
-    if strings.HasPrefix(ref.File, "~/") {
-        ref.File = filepath.Join(home, ref.File[2:])
+    if homeErr != nil {
+        return fmt.Errorf("expanding home directory: %w", homeErr)
+    }
+
+    if strings.Contains(ref.File, "..") {
+        return fmt.Errorf("path traversal not allowed: %q", ref.File)
     }
 
     ref.File = filepath.Clean(ref.File)
@@ -101,8 +112,12 @@ func (ref *CredentialRef) expandAndValidatePath() error {
 }
 ```
 
-Order is deliberate: HOME expansion happens **before** the `..` guard so
-a home directory value containing `..` cannot bypass the check.
+Order is deliberate: both `$HOME` and `~/` are expanded **before** the
+`..` guard so a home directory value containing `..` cannot bypass the
+check. Home is resolved lazily via `getHome()` — called only when a
+`HOME` token or a `~/` prefix is actually present — so a path like
+`$HOMEDIR/token` (parsed by `os.Expand` as the variable `HOMEDIR`, not
+`HOME`) never triggers a home lookup or its error.
 
 ### Alternatives considered
 
@@ -159,4 +174,45 @@ the correct primitive for a single-variable allowlist.
 
 ## Lessons Learned
 
-Populated after execution. Do not fill in during initial drafting.
+### Substring precheck for `$HOME` caused a false-positive error path
+
+1. **What happened:** The first implementation gated home resolution on a
+   `usesHome` precheck using `strings.Contains(ref.File, "$HOME")`. This
+   matches `$HOMEDIR` as a substring, but `os.Expand` parses that token as
+   the variable `HOMEDIR` and leaves it literal. On a host where
+   `os.UserHomeDir()` fails (no `HOME` set), a path like `$HOMEDIR/token`
+   would have errored even though it never references `$HOME`.
+2. **Why it wasn't caught earlier:** The initial tests only covered the
+   exact `$HOME`/`${HOME}` tokens and the happy path where home resolves.
+   No test exercised a longer variable name that shares the `$HOME`
+   prefix, and no test ran with `HOME` unset. Caught in code review.
+3. **What should change:** Resolve `home` lazily inside the `os.Expand`
+   mapping closure, keyed on the exact parsed variable name
+   (`name == "HOME"`), rather than a substring precheck. Added
+   `TestCredentialRef_HomeSubstringVarNotTreatedAsHome` to lock this in.
+
+### `~/` expansion via `filepath.Join` silently Clean'd away `..`
+
+1. **What happened:** The `~/` branch used `filepath.Join(home, ...)`,
+   which calls `filepath.Clean` internally. If home resolved to a value
+   containing `..` (e.g. `/etc/../etc`), the traversal guard that runs
+   afterward would never see the `..` — it had already been collapsed.
+   The `$HOME` traversal test passed, masking the gap for the `~/` form.
+2. **Why it wasn't caught earlier:** The traversal-rejection test used the
+   `$HOME` form only; there was no equivalent test for `~/`.
+3. **What should change:** Expand `~/` by string concatenation so the
+   guard sees the raw `..`, then `filepath.Clean` at the very end. Added
+   `TestCredentialRef_TildeExpansionTraversalRejected`.
+
+### CI does not run markdownlint or golangci-lint
+
+1. **What happened:** The PR description deferred markdown linting to CI,
+   but `.github/workflows/ci.yml` runs only `go test`. Markdownlint,
+   golangci-lint, and yamllint have `make` targets but are not wired into
+   CI, so "CI will cover it" was inaccurate.
+2. **Why it wasn't caught earlier:** Assumed the lint make targets ran in
+   CI without checking the workflow file.
+3. **What should change:** Run `make lint` (and markdown/yaml lint when the
+   tools are available) locally before opening a PR; do not rely on CI for
+   lint coverage it does not provide. Wiring lint into CI is a separate
+   improvement worth tracking.

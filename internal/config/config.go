@@ -252,31 +252,43 @@ func (ref *CredentialRef) expandAndValidatePath() error {
 
 	// Only the home directory is expanded: ~/, $HOME, and ${HOME} all
 	// resolve to os.UserHomeDir(). Any other environment variable is left
-	// literal. Resolve home once and reuse it for both forms.
-	usesHome := strings.HasPrefix(ref.File, "~/") ||
-		strings.Contains(ref.File, "$HOME") ||
-		strings.Contains(ref.File, "${HOME}")
-
-	home, homeErr := os.UserHomeDir()
-	if usesHome && homeErr != nil {
-		return fmt.Errorf("expanding home directory: %w", homeErr)
+	// literal. Home is resolved lazily, at most once, and only when a form
+	// that actually needs it is present — so a path like "$HOMEDIR/token"
+	// (which os.Expand parses as the variable HOMEDIR, not HOME) never
+	// triggers a home lookup or its error.
+	var home string
+	var homeResolved bool
+	var homeErr error
+	getHome := func() string {
+		if !homeResolved {
+			home, homeErr = os.UserHomeDir()
+			homeResolved = true
+		}
+		return home
 	}
 
-	// Expand $HOME/${HOME} before the traversal guard so a home value
-	// containing ".." cannot bypass the check. Other vars stay literal.
+	// Expand $HOME/${HOME}. Other vars stay literal.
 	ref.File = os.Expand(ref.File, func(name string) string {
 		if name == "HOME" {
-			return home
+			return getHome()
 		}
 		return "$" + name
 	})
 
-	if strings.Contains(ref.File, "..") {
-		return fmt.Errorf("path traversal not allowed: %q", ref.File)
+	// Expand a leading ~/ by simple concatenation (not filepath.Join, which
+	// would Clean away any ".." before the traversal guard runs).
+	if strings.HasPrefix(ref.File, "~/") {
+		ref.File = getHome() + ref.File[1:]
 	}
 
-	if strings.HasPrefix(ref.File, "~/") {
-		ref.File = filepath.Join(home, ref.File[2:])
+	if homeErr != nil {
+		return fmt.Errorf("expanding home directory: %w", homeErr)
+	}
+
+	// Run the traversal guard on the fully expanded path, before Clean, so a
+	// home directory value containing ".." cannot bypass the check.
+	if strings.Contains(ref.File, "..") {
+		return fmt.Errorf("path traversal not allowed: %q", ref.File)
 	}
 
 	ref.File = filepath.Clean(ref.File)
