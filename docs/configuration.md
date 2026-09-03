@@ -97,8 +97,10 @@ secret value. It is an inline YAML object with one source mode.
 token: {file: "~/.config/app/token"}
 ```
 
-Reads the file and returns the trimmed content. Tilde (`~`) is expanded to
-the user's home directory. Paths containing `..` are rejected.
+Reads the file and returns the trimmed content. In `file` paths, `~/`,
+`$HOME`, and `${HOME}` are all expanded to the user's home directory;
+other environment variables are left literal (not expanded). Paths
+containing `..` are rejected.
 
 ### From a structured file (JSON or YAML)
 

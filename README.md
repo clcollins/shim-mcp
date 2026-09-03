@@ -87,9 +87,9 @@ the user level (available in all projects) or the project level.
 ```
 
 Replace `/home/YOUR_USER/` with your actual home directory path. The
-`--config` flag requires an absolute path — tilde expansion (`~`) is
-handled inside the config file for credential paths, but the config
-file path itself must be absolute.
+`--config` flag requires an absolute path — home expansion (`~/`,
+`$HOME`, `${HOME}`) is handled inside the config file for credential
+paths, but the config file path itself must be absolute.
 
 ### 4. Verify it works
 
@@ -207,6 +207,9 @@ token: {file: "~/.config/app/credentials", format: json, key: ".token"}
 # Environment variable
 token: {env: "API_TOKEN"}
 ```
+
+In `file` paths, `~/`, `$HOME`, and `${HOME}` all expand to your home
+directory. Other environment variables are left literal (not expanded).
 
 See [docs/configuration.md](docs/configuration.md) for the full
 reference including key path syntax and validation rules.

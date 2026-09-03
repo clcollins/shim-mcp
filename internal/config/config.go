@@ -250,15 +250,32 @@ func (ref *CredentialRef) expandAndValidatePath() error {
 		return nil
 	}
 
+	// Only the home directory is expanded: ~/, $HOME, and ${HOME} all
+	// resolve to os.UserHomeDir(). Any other environment variable is left
+	// literal. Resolve home once and reuse it for both forms.
+	usesHome := strings.HasPrefix(ref.File, "~/") ||
+		strings.Contains(ref.File, "$HOME") ||
+		strings.Contains(ref.File, "${HOME}")
+
+	home, homeErr := os.UserHomeDir()
+	if usesHome && homeErr != nil {
+		return fmt.Errorf("expanding home directory: %w", homeErr)
+	}
+
+	// Expand $HOME/${HOME} before the traversal guard so a home value
+	// containing ".." cannot bypass the check. Other vars stay literal.
+	ref.File = os.Expand(ref.File, func(name string) string {
+		if name == "HOME" {
+			return home
+		}
+		return "$" + name
+	})
+
 	if strings.Contains(ref.File, "..") {
 		return fmt.Errorf("path traversal not allowed: %q", ref.File)
 	}
 
 	if strings.HasPrefix(ref.File, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("expanding ~: %w", err)
-		}
 		ref.File = filepath.Join(home, ref.File[2:])
 	}
 
