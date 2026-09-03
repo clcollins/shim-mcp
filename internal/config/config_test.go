@@ -314,6 +314,20 @@ func TestCredentialRef_TildeExpansionTraversalRejected(t *testing.T) {
 	}
 }
 
+func TestCredentialRef_RootHomeNoDoubleSlash(t *testing.T) {
+	// When HOME is "/", concatenating ~/shadow yields "//shadow"; the final
+	// filepath.Clean must normalize it to "/shadow".
+	t.Setenv("HOME", "/")
+
+	ref := CredentialRef{File: "~/shadow"}
+	if err := ref.expandAndValidatePath(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ref.File != "/shadow" {
+		t.Errorf("got %q, want %q", ref.File, "/shadow")
+	}
+}
+
 func TestCredentialRef_HomeSubstringVarNotTreatedAsHome(t *testing.T) {
 	// "$HOMEDIR" contains the substring "$HOME" but os.Expand parses the
 	// variable name as HOMEDIR, so it must be left literal and must NOT

@@ -276,11 +276,15 @@ func (ref *CredentialRef) expandAndValidatePath() error {
 	})
 
 	// Expand a leading ~/ by simple concatenation (not filepath.Join, which
-	// would Clean away any ".." before the traversal guard runs).
+	// would Clean away any ".." before the traversal guard runs). A "/" home
+	// yields a leading "//", which the final filepath.Clean normalizes.
 	if strings.HasPrefix(ref.File, "~/") {
 		ref.File = getHome() + ref.File[1:]
 	}
 
+	// Check the lookup error after expansion. On failure ref.File may hold a
+	// mangled value (empty home concatenated with the path), but it is never
+	// read before this early return.
 	if homeErr != nil {
 		return fmt.Errorf("expanding home directory: %w", homeErr)
 	}

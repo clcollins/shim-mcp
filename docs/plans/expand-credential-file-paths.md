@@ -204,15 +204,17 @@ the correct primitive for a single-variable allowlist.
    guard sees the raw `..`, then `filepath.Clean` at the very end. Added
    `TestCredentialRef_TildeExpansionTraversalRejected`.
 
-### CI does not run markdownlint or golangci-lint
+### Misread CI coverage from an incomplete grep
 
-1. **What happened:** The PR description deferred markdown linting to CI,
-   but `.github/workflows/ci.yml` runs only `go test`. Markdownlint,
-   golangci-lint, and yamllint have `make` targets but are not wired into
-   CI, so "CI will cover it" was inaccurate.
-2. **Why it wasn't caught earlier:** Assumed the lint make targets ran in
-   CI without checking the workflow file.
-3. **What should change:** Run `make lint` (and markdown/yaml lint when the
-   tools are available) locally before opening a PR; do not rely on CI for
-   lint coverage it does not provide. Wiring lint into CI is a separate
-   improvement worth tracking.
+1. **What happened:** During review I claimed `.github/workflows/ci.yml`
+   "runs only `go test`" and that markdownlint/golangci-lint were not in
+   CI. That was wrong: `ci.yml` has dedicated jobs for Lint (`make lint`),
+   Markdown Lint (`make markdown-lint`), YAML Lint, Format Check, Vet,
+   Race, Coverage, and Plan Docs Check. Relying on CI for markdown lint is
+   in fact valid.
+2. **Why it wasn't caught earlier:** I grepped `ci.yml` for a narrow set
+   of terms that happened to match only the coverage job's `go test` line
+   and drew a conclusion from that single hit instead of reading the
+   whole workflow.
+3. **What should change:** When asserting what CI does or does not do,
+   read the full workflow file rather than inferring from a partial grep.
