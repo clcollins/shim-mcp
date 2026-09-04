@@ -250,16 +250,49 @@ func (ref *CredentialRef) expandAndValidatePath() error {
 		return nil
 	}
 
-	if strings.Contains(ref.File, "..") {
-		return fmt.Errorf("path traversal not allowed: %q", ref.File)
+	// Only the home directory is expanded: ~/, $HOME, and ${HOME} all
+	// resolve to os.UserHomeDir(). Any other environment variable is left
+	// literal. Home is resolved lazily, at most once, and only when a form
+	// that actually needs it is present — so a path like "$HOMEDIR/token"
+	// (which os.Expand parses as the variable HOMEDIR, not HOME) never
+	// triggers a home lookup or its error.
+	var home string
+	var homeResolved bool
+	var homeErr error
+	getHome := func() string {
+		if !homeResolved {
+			home, homeErr = os.UserHomeDir()
+			homeResolved = true
+		}
+		return home
 	}
 
-	if strings.HasPrefix(ref.File, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("expanding ~: %w", err)
+	// Expand $HOME/${HOME}. Other vars stay literal.
+	ref.File = os.Expand(ref.File, func(name string) string {
+		if name == "HOME" {
+			return getHome()
 		}
-		ref.File = filepath.Join(home, ref.File[2:])
+		return "$" + name
+	})
+
+	// Expand a leading ~/ by simple concatenation (not filepath.Join, which
+	// would Clean away any ".." before the traversal guard runs). A "/" home
+	// yields a leading "//", which the final filepath.Clean normalizes.
+	if strings.HasPrefix(ref.File, "~/") {
+		ref.File = getHome() + ref.File[1:]
+	}
+
+	// Check the lookup error after expansion. On failure ref.File may hold a
+	// mangled value (empty home concatenated with the path), but it is never
+	// read before this early return.
+	if homeErr != nil {
+		return fmt.Errorf("expanding home directory: %w", homeErr)
+	}
+
+	// Run the traversal guard on the fully expanded path, before Clean, so a
+	// home directory value containing ".." cannot bypass the check.
+	if strings.Contains(ref.File, "..") {
+		return fmt.Errorf("path traversal not allowed: %q", ref.File)
 	}
 
 	ref.File = filepath.Clean(ref.File)

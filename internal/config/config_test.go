@@ -249,6 +249,102 @@ func TestCredentialRef_PathTraversalRejected(t *testing.T) {
 	}
 }
 
+func TestCredentialRef_HomeVarExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+	expected := filepath.Join(home, "some/token")
+
+	tests := []struct {
+		name string
+		file string
+	}{
+		{"dollar HOME", "$HOME/some/token"},
+		{"braced HOME", "${HOME}/some/token"},
+		{"tilde", "~/some/token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ref := CredentialRef{File: tt.file}
+			if err := ref.expandAndValidatePath(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ref.File != expected {
+				t.Errorf("got %q, want %q", ref.File, expected)
+			}
+		})
+	}
+}
+
+func TestCredentialRef_OtherEnvVarLeftLiteral(t *testing.T) {
+	t.Setenv("SHIM_TEST_UNRELATED", "/should/not/be/used")
+
+	ref := CredentialRef{File: "$SHIM_TEST_UNRELATED/token"}
+	if err := ref.expandAndValidatePath(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Only $HOME is honored; other vars must be left literal (then Clean'd).
+	want := filepath.Clean("$SHIM_TEST_UNRELATED/token")
+	if ref.File != want {
+		t.Errorf("got %q, want %q (other env vars must not expand)", ref.File, want)
+	}
+}
+
+func TestCredentialRef_HomeExpansionTraversalRejected(t *testing.T) {
+	// A HOME value containing ".." must still be caught by the traversal
+	// guard, which requires HOME expansion to run before the guard.
+	t.Setenv("HOME", "/etc/../etc")
+
+	ref := CredentialRef{File: "$HOME/shadow"}
+	if err := ref.expandAndValidatePath(); err == nil {
+		t.Fatal("expected error for traversal via expanded $HOME")
+	}
+}
+
+func TestCredentialRef_TildeExpansionTraversalRejected(t *testing.T) {
+	// A ~/ path whose home resolves to a ".." path must also be rejected;
+	// this requires ~ expansion via concatenation (not filepath.Join, which
+	// would Clean the ".." away before the guard runs).
+	t.Setenv("HOME", "/etc/../etc")
+
+	ref := CredentialRef{File: "~/shadow"}
+	if err := ref.expandAndValidatePath(); err == nil {
+		t.Fatal("expected error for traversal via expanded ~")
+	}
+}
+
+func TestCredentialRef_RootHomeNoDoubleSlash(t *testing.T) {
+	// When HOME is "/", concatenating ~/shadow yields "//shadow"; the final
+	// filepath.Clean must normalize it to "/shadow".
+	t.Setenv("HOME", "/")
+
+	ref := CredentialRef{File: "~/shadow"}
+	if err := ref.expandAndValidatePath(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ref.File != "/shadow" {
+		t.Errorf("got %q, want %q", ref.File, "/shadow")
+	}
+}
+
+func TestCredentialRef_HomeSubstringVarNotTreatedAsHome(t *testing.T) {
+	// "$HOMEDIR" contains the substring "$HOME" but os.Expand parses the
+	// variable name as HOMEDIR, so it must be left literal and must NOT
+	// trigger a home lookup (which could spuriously error if HOME is unset).
+	// Unset HOME to prove no home resolution happens for this path.
+	t.Setenv("HOME", "")
+
+	ref := CredentialRef{File: "$HOMEDIR/token"}
+	if err := ref.expandAndValidatePath(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Clean("$HOMEDIR/token")
+	if ref.File != want {
+		t.Errorf("got %q, want %q ($HOMEDIR must be left literal)", ref.File, want)
+	}
+}
+
 // --- inferFormat tests ---
 
 func TestInferFormat(t *testing.T) {
