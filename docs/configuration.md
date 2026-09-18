@@ -141,10 +141,49 @@ The `key` field uses a dot-path syntax to navigate structured files:
 
 The same syntax works for both JSON and YAML files.
 
+### Caching
+
+A credential read from a file is resolved on every proxied request, so a
+rotated token is picked up without restarting shim-mcp. To avoid re-reading
+and re-parsing the file when nothing has changed, the resolved value is
+cached and the file is stat-ed instead. The cached value is discarded, and
+the file read again, when any of the following differ from the read that
+produced it:
+
+- the file identity (device and inode — so a replacement installed by
+  atomic rename is detected)
+- the file size
+- the modification time (compared for equality, so a timestamp moved
+  backwards by a restore or a `cp -p` also invalidates the cache)
+
+There are no background watchers and no polling: the check happens on the
+next request that needs the credential.
+
+A file rewritten in place with the same inode, the same length, and a
+modification time the filesystem records as identical is not detected.
+Detecting that case would require hashing the contents, which means
+reading the file — the cost the cache exists to avoid. Set `cache: false`
+to read the file on every request instead:
+
+```yaml
+token:
+  file: "~/.config/app/token"
+  cache: false
+```
+
+Credentials read from the environment are never cached — `env` references
+are re-read from the process environment on every request, and `cache` is
+not a valid field alongside `env`.
+
+A stat failure — a deleted, renamed, or unreadable file — is returned as
+an error. A cached value is never served in place of a file that can no
+longer be read.
+
 ### Validation rules
 
 - Exactly one of `file` or `env` must be set (not both, not neither)
 - `key` and `format` are only valid with `file` (not `env`)
+- `cache` is only valid with `file` (not `env`); it defaults to `true`
 - `format` must be `json`, `yaml`, or `text` when set
 - File paths must not contain `..` (path traversal prevention)
 - The value at the resolved path must be a string

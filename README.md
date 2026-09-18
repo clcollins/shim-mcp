@@ -202,15 +202,22 @@ token: {file: "~/.config/app/credentials", format: json, key: ".token"}
 
 # Environment variable
 token: {env: "API_TOKEN"}
+
+# Re-read the file on every request instead of when it changes
+token: {file: "~/.config/app/token", cache: false}
 ```
 
+Credential files are re-read when they change on disk — a rotated token
+is picked up by the next request, with no restart and no file watcher.
+
 See [docs/configuration.md](docs/configuration.md) for the full
-reference including key path syntax and validation rules.
+reference including key path syntax, caching, and validation rules.
 
 ## Security
 
-- Credentials are resolved at request time, never cached or sent
-  over MCP
+- Credentials are resolved at request time from local files or the
+  environment, and never sent over MCP. A value read from a file is
+  held in memory only until that file changes on disk
 - All `Authorization` headers are scrubbed from responses
 - Requests are restricted to configured `base_url` prefixes (SSRF
   prevention)

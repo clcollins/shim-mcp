@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -69,6 +70,56 @@ type CredentialRef struct {
 	Env    string `mapstructure:"env"`
 	Format string `mapstructure:"format"`
 	Key    string `mapstructure:"key"`
+
+	// Cache controls whether a file-backed credential is re-read on every
+	// resolve or only when the file changes on disk. Unset means enabled;
+	// set it to false to read the file every time. It has no meaning for
+	// env-backed credentials, which are never cached.
+	Cache *bool `mapstructure:"cache"`
+
+	// fileCache is attached during config load and shared by every copy of
+	// this ref. A nil cache means "resolve reads the file every time".
+	fileCache *credentialCache
+}
+
+// credentialCache holds the value last resolved from a credential file,
+// together with the identity and metadata of the file it was read from.
+//
+// The mutex sits behind a pointer rather than inside CredentialRef because
+// CredentialRef is copied by value throughout config load and provider
+// construction; an inline mutex would trip go vet's copylocks analyzer at
+// every one of those copies. The pointer also gives all copies of a ref one
+// shared cache instead of one each.
+type credentialCache struct {
+	mu    sync.Mutex
+	value string
+	info  os.FileInfo
+}
+
+// lookup returns the cached value when info describes the same file, of the
+// same size, modified at the same time as the read that produced it. The
+// caller must hold c.mu.
+//
+// Modification times are compared for equality rather than recency: a file
+// restored from a backup or copied with preserved timestamps can carry an
+// older mtime than the cached entry, and that is a change like any other.
+// os.SameFile compares device and inode, which catches a credential file
+// replaced by an atomic rename even when size and mtime are preserved.
+func (c *credentialCache) lookup(info os.FileInfo) (string, bool) {
+	if c.info == nil || !os.SameFile(c.info, info) {
+		return "", false
+	}
+	if c.info.Size() != info.Size() || !c.info.ModTime().Equal(info.ModTime()) {
+		return "", false
+	}
+	return c.value, true
+}
+
+// store records a resolved value against the file it was read from. The
+// caller must hold c.mu.
+func (c *credentialCache) store(info os.FileInfo, value string) {
+	c.info = info
+	c.value = value
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -167,6 +218,7 @@ func validateCredentialRef(serviceName, field string, ref *CredentialRef) error 
 	if err := ref.expandAndValidatePath(); err != nil {
 		return fmt.Errorf("service %q: auth.%s: %w", serviceName, field, err)
 	}
+	ref.initCache()
 	return nil
 }
 
@@ -187,10 +239,18 @@ func (ref *CredentialRef) Validate() error {
 	if !hasFile && ref.Format != "" {
 		return fmt.Errorf("format requires file (not env)")
 	}
+	if !hasFile && ref.Cache != nil {
+		return fmt.Errorf("cache requires file (not env)")
+	}
 	return nil
 }
 
 // Resolve reads the credential value from the configured source.
+//
+// Environment-backed credentials are read from the environment every time.
+// File-backed credentials are re-read when the file has changed since the
+// last resolve, and served from cache when it has not; a ref with no cache
+// attached reads the file every time.
 func (ref *CredentialRef) Resolve() (string, error) {
 	if ref.Env != "" {
 		val := os.Getenv(ref.Env)
@@ -200,21 +260,48 @@ func (ref *CredentialRef) Resolve() (string, error) {
 		return val, nil
 	}
 
+	if ref.fileCache == nil {
+		return ref.readAndParse()
+	}
+
+	ref.fileCache.mu.Lock()
+	defer ref.fileCache.mu.Unlock()
+
+	// Stat before reading. If the file changes in between, the value returned
+	// is the new content and the recorded stat is already stale, so the next
+	// resolve re-reads — the safe direction to be wrong in.
+	info, err := os.Stat(ref.File)
+	if err != nil {
+		return "", fmt.Errorf("stat credential file: %w", err)
+	}
+
+	if val, ok := ref.fileCache.lookup(info); ok {
+		return val, nil
+	}
+
+	val, err := ref.readAndParse()
+	if err != nil {
+		// Leave the cache as it was: the stat that failed to parse is not
+		// recorded, so the next resolve tries again rather than serving a
+		// value that no longer matches the file.
+		return "", err
+	}
+
+	ref.fileCache.store(info, val)
+	return val, nil
+}
+
+// readAndParse reads the credential file and extracts the configured value.
+func (ref *CredentialRef) readAndParse() (string, error) {
 	data, err := os.ReadFile(ref.File)
 	if err != nil {
 		return "", fmt.Errorf("reading credential file: %w", err)
 	}
+	return ref.parseCredential(data)
+}
 
-	format := inferFormat(ref.File, ref.Format)
-
-	if ref.Key == "" && format == "text" {
-		val := strings.TrimSpace(string(data))
-		if val == "" {
-			return "", fmt.Errorf("credential file is empty: %s", ref.File)
-		}
-		return val, nil
-	}
-
+// parseCredential extracts the credential value from raw file contents.
+func (ref *CredentialRef) parseCredential(data []byte) (string, error) {
 	if ref.Key == "" {
 		val := strings.TrimSpace(string(data))
 		if val == "" {
@@ -222,6 +309,8 @@ func (ref *CredentialRef) Resolve() (string, error) {
 		}
 		return val, nil
 	}
+
+	format := inferFormat(ref.File, ref.Format)
 
 	if format == "env" {
 		return resolveEnvFile(string(data), ref.Key)
@@ -243,6 +332,17 @@ func (ref *CredentialRef) Resolve() (string, error) {
 	}
 
 	return extractPath(obj, ref.Key)
+}
+
+// initCache attaches a cache to a file-backed ref that has not opted out.
+// It runs once per ref during config load, before the ref is copied into the
+// service map, so every later copy shares the one cache.
+func (ref *CredentialRef) initCache() {
+	if ref.File == "" || (ref.Cache != nil && !*ref.Cache) {
+		ref.fileCache = nil
+		return
+	}
+	ref.fileCache = &credentialCache{}
 }
 
 func (ref *CredentialRef) expandAndValidatePath() error {

@@ -3,7 +3,9 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 func writeTestConfig(t *testing.T, content string) string {
@@ -905,5 +907,385 @@ services:
 	}
 	if cfg.Services["svc"].Auth.Token.File != "" && cfg.Services["svc"].Auth.Token.Env != "" {
 		t.Error("none auth should not require credentials")
+	}
+}
+
+// --- Credential cache tests ---
+
+// cachedRef builds a file-backed ref wired the way LoadConfig wires one.
+func cachedRef(t *testing.T, ref CredentialRef) CredentialRef {
+	t.Helper()
+	ref.initCache()
+	if ref.fileCache == nil {
+		t.Fatal("expected a cache to be attached")
+	}
+	return ref
+}
+
+// rewrite replaces a file's contents and sets its mtime explicitly, so tests
+// assert on metadata they control rather than on filesystem timestamp
+// granularity.
+func rewrite(t *testing.T, path string, content []byte, mtime time.Time) {
+	t.Helper()
+	writeFile(t, path, content)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("setting mtime: %v", err)
+	}
+}
+
+func mustResolve(t *testing.T, ref *CredentialRef) string {
+	t.Helper()
+	val, err := ref.Resolve()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return val
+}
+
+func TestCredentialRef_CacheHitUnchangedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	mtime := time.Unix(1700000000, 0)
+	rewrite(t, path, []byte("first-token\n"), mtime)
+
+	ref := cachedRef(t, CredentialRef{File: path})
+	if val := mustResolve(t, &ref); val != "first-token" {
+		t.Fatalf("got %q, want %q", val, "first-token")
+	}
+
+	// Same length, same mtime: as far as stat can tell, nothing happened.
+	rewrite(t, path, []byte("other-token\n"), mtime)
+
+	if val := mustResolve(t, &ref); val != "first-token" {
+		t.Errorf("got %q, want cached %q", val, "first-token")
+	}
+}
+
+func TestCredentialRef_CacheMissOnNewerMtime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	rewrite(t, path, []byte("old-token\n"), time.Unix(1700000000, 0))
+
+	ref := cachedRef(t, CredentialRef{File: path})
+	if val := mustResolve(t, &ref); val != "old-token" {
+		t.Fatalf("got %q, want %q", val, "old-token")
+	}
+
+	rewrite(t, path, []byte("new-token\n"), time.Unix(1700000060, 0))
+
+	if val := mustResolve(t, &ref); val != "new-token" {
+		t.Errorf("got %q, want %q", val, "new-token")
+	}
+}
+
+func TestCredentialRef_CacheMissOnOlderMtime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	rewrite(t, path, []byte("current-token\n"), time.Unix(1700000000, 0))
+
+	ref := cachedRef(t, CredentialRef{File: path})
+	if val := mustResolve(t, &ref); val != "current-token" {
+		t.Fatalf("got %q, want %q", val, "current-token")
+	}
+
+	// A restore from backup can move the timestamp backwards.
+	rewrite(t, path, []byte("restored-token\n"), time.Unix(1600000000, 0))
+
+	if val := mustResolve(t, &ref); val != "restored-token" {
+		t.Errorf("got %q, want %q", val, "restored-token")
+	}
+}
+
+func TestCredentialRef_CacheMissOnSizeChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	mtime := time.Unix(1700000000, 0)
+	rewrite(t, path, []byte("short\n"), mtime)
+
+	ref := cachedRef(t, CredentialRef{File: path})
+	if val := mustResolve(t, &ref); val != "short" {
+		t.Fatalf("got %q, want %q", val, "short")
+	}
+
+	rewrite(t, path, []byte("a-considerably-longer-token\n"), mtime)
+
+	if val := mustResolve(t, &ref); val != "a-considerably-longer-token" {
+		t.Errorf("got %q, want %q", val, "a-considerably-longer-token")
+	}
+}
+
+func TestCredentialRef_CacheMissOnAtomicRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	mtime := time.Unix(1700000000, 0)
+	rewrite(t, path, []byte("first-token\n"), mtime)
+
+	ref := cachedRef(t, CredentialRef{File: path})
+	if val := mustResolve(t, &ref); val != "first-token" {
+		t.Fatalf("got %q, want %q", val, "first-token")
+	}
+
+	// Publish a replacement of identical size and mtime by rename, the way
+	// credential writers usually install a new file. Only the inode changes.
+	staged := filepath.Join(dir, "token.new")
+	rewrite(t, staged, []byte("other-token\n"), mtime)
+	if err := os.Rename(staged, path); err != nil {
+		t.Fatalf("renaming: %v", err)
+	}
+
+	if val := mustResolve(t, &ref); val != "other-token" {
+		t.Errorf("got %q, want %q", val, "other-token")
+	}
+}
+
+func TestCredentialRef_CacheMissOnStructuredFileChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.yaml")
+	rewrite(t, path, []byte("api:\n  token: old-token\n"), time.Unix(1700000000, 0))
+
+	ref := cachedRef(t, CredentialRef{File: path, Key: ".api.token"})
+	if val := mustResolve(t, &ref); val != "old-token" {
+		t.Fatalf("got %q, want %q", val, "old-token")
+	}
+
+	rewrite(t, path, []byte("api:\n  token: new-token\n"), time.Unix(1700000060, 0))
+
+	if val := mustResolve(t, &ref); val != "new-token" {
+		t.Errorf("got %q, want %q", val, "new-token")
+	}
+}
+
+func TestCredentialRef_CacheDeletedFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	rewrite(t, path, []byte("my-token\n"), time.Unix(1700000000, 0))
+
+	ref := cachedRef(t, CredentialRef{File: path})
+	if val := mustResolve(t, &ref); val != "my-token" {
+		t.Fatalf("got %q, want %q", val, "my-token")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("removing file: %v", err)
+	}
+
+	val, err := ref.Resolve()
+	if err == nil {
+		t.Fatalf("expected an error for a deleted file, got %q", val)
+	}
+}
+
+func TestCredentialRef_CacheNotPoisonedByParseError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	rewrite(t, path, []byte(`{"token":"good-token"}`), time.Unix(1700000000, 0))
+
+	ref := cachedRef(t, CredentialRef{File: path, Key: ".token"})
+	if val := mustResolve(t, &ref); val != "good-token" {
+		t.Fatalf("got %q, want %q", val, "good-token")
+	}
+
+	rewrite(t, path, []byte("{not json at all"), time.Unix(1700000060, 0))
+
+	if _, err := ref.Resolve(); err == nil {
+		t.Fatal("expected a parse error, got none")
+	}
+
+	// The failed read must not have been recorded, and the stale value must
+	// not be served in its place.
+	if _, err := ref.Resolve(); err == nil {
+		t.Fatal("expected the parse error to repeat, got none")
+	}
+
+	rewrite(t, path, []byte(`{"token":"fixed-token"}`), time.Unix(1700000120, 0))
+
+	if val := mustResolve(t, &ref); val != "fixed-token" {
+		t.Errorf("got %q, want %q", val, "fixed-token")
+	}
+}
+
+func TestCredentialRef_CacheDisabledReadsEveryTime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	mtime := time.Unix(1700000000, 0)
+	rewrite(t, path, []byte("first-token\n"), mtime)
+
+	disabled := false
+	ref := CredentialRef{File: path, Cache: &disabled}
+	ref.initCache()
+	if ref.fileCache != nil {
+		t.Fatal("expected no cache when cache is disabled")
+	}
+
+	if val := mustResolve(t, &ref); val != "first-token" {
+		t.Fatalf("got %q, want %q", val, "first-token")
+	}
+
+	// Identical metadata would be a cache hit; without a cache it is a re-read.
+	rewrite(t, path, []byte("other-token\n"), mtime)
+
+	if val := mustResolve(t, &ref); val != "other-token" {
+		t.Errorf("got %q, want %q", val, "other-token")
+	}
+}
+
+func TestCredentialRef_UncachedRefResolves(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	mtime := time.Unix(1700000000, 0)
+	rewrite(t, path, []byte("first-token\n"), mtime)
+
+	// A ref built without LoadConfig has no cache and behaves as before.
+	ref := CredentialRef{File: path}
+	if val := mustResolve(t, &ref); val != "first-token" {
+		t.Fatalf("got %q, want %q", val, "first-token")
+	}
+
+	rewrite(t, path, []byte("other-token\n"), mtime)
+
+	if val := mustResolve(t, &ref); val != "other-token" {
+		t.Errorf("got %q, want %q", val, "other-token")
+	}
+}
+
+func TestCredentialRef_EnvNeverCached(t *testing.T) {
+	t.Setenv("TEST_CACHE_CRED", "first-value")
+	ref := CredentialRef{Env: "TEST_CACHE_CRED"}
+	ref.initCache()
+	if ref.fileCache != nil {
+		t.Fatal("expected no cache for an env-backed credential")
+	}
+
+	if val := mustResolve(t, &ref); val != "first-value" {
+		t.Fatalf("got %q, want %q", val, "first-value")
+	}
+
+	t.Setenv("TEST_CACHE_CRED", "second-value")
+
+	if val := mustResolve(t, &ref); val != "second-value" {
+		t.Errorf("got %q, want %q", val, "second-value")
+	}
+}
+
+func TestCredentialRef_ConcurrentResolve(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	rewrite(t, path, []byte("concurrent-token\n"), time.Unix(1700000000, 0))
+
+	ref := cachedRef(t, CredentialRef{File: path})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			val, err := ref.Resolve()
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if val != "concurrent-token" {
+				t.Errorf("got %q, want %q", val, "concurrent-token")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestCredentialRef_ValidateCacheWithoutFile(t *testing.T) {
+	enabled := true
+	ref := CredentialRef{Env: "TOKEN", Cache: &enabled}
+	if err := ref.Validate(); err == nil {
+		t.Error("expected error when cache is set with env")
+	}
+}
+
+func TestLoadConfig_AttachesCredentialCache(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	writeFile(t, tokenPath, []byte("my-token\n"))
+
+	path := writeTestConfig(t, `
+services:
+  cached:
+    base_url: "https://api.example.com"
+    auth:
+      type: bearer
+      token: {file: "`+tokenPath+`"}
+  uncached:
+    base_url: "https://api.example.com"
+    auth:
+      type: bearer
+      token: {file: "`+tokenPath+`", cache: false}
+  env:
+    base_url: "https://api.example.com"
+    auth:
+      type: bearer
+      token: {env: "SOME_TOKEN"}
+`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Services["cached"].Auth.Token.fileCache == nil {
+		t.Error("expected a cache on the file-backed credential")
+	}
+	if cfg.Services["uncached"].Auth.Token.fileCache != nil {
+		t.Error("expected no cache when cache: false")
+	}
+	if cfg.Services["env"].Auth.Token.fileCache != nil {
+		t.Error("expected no cache on an env-backed credential")
+	}
+}
+
+func TestLoadConfig_CacheWithEnvRejected(t *testing.T) {
+	path := writeTestConfig(t, `
+services:
+  test:
+    base_url: "https://api.example.com"
+    auth:
+      type: bearer
+      token: {env: "SOME_TOKEN", cache: true}
+`)
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Error("expected error when cache is set alongside env")
+	}
+}
+
+func TestLoadConfig_SharedCacheAcrossCopies(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	writeFile(t, tokenPath, []byte("shared-token\n"))
+
+	path := writeTestConfig(t, `
+services:
+  test:
+    base_url: "https://api.example.com"
+    auth:
+      type: bearer
+      token: {file: "`+tokenPath+`"}
+`)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Auth providers hold copies of the ref; every copy must share one cache
+	// so that a value resolved through one is visible to the others.
+	ref := cfg.Services["test"].Auth.Token
+	copied := ref
+	if ref.fileCache != copied.fileCache {
+		t.Fatal("expected copies of a ref to share one cache")
+	}
+
+	if val := mustResolve(t, &ref); val != "shared-token" {
+		t.Fatalf("got %q, want %q", val, "shared-token")
+	}
+	if val := mustResolve(t, &copied); val != "shared-token" {
+		t.Errorf("got %q, want %q", val, "shared-token")
 	}
 }
